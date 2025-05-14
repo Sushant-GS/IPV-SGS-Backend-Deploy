@@ -10,7 +10,7 @@ import base64
 app = Flask(__name__)
 CORS(app) 
 
-HF_API_URL = "https://shivamkunkolikar-unet-inpaint-space.hf.space/run/predict"
+HF_API_URL = "https://shivamkunkolikar-unet-inpaint-space.hf.space/"
 
 @app.route('/')
 def home():
