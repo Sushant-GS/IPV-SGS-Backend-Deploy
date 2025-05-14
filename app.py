@@ -1,86 +1,66 @@
-from flask import Flask
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from PIL import Image
 import numpy as np
 import cv2
-import os
+import io
+import requests
+import base64
 
 app = Flask(__name__)
+CORS(app) 
 
-def median_surrounding_inpaint(image, mask, loc):
-    H = image.shape[0]
-    W = image.shape[1]
-    i, j = loc
-    arrR = []
-    arrG = []
-    arrB = []
-    for ii in range(i-1, i+2, 1):
-        for jj in range(j-1, j+2, 1):
-            if ii > 0 and jj > 0 and ii < H-1 and jj < W-1 and mask[ii, jj] == 0:
-                arrR.append(image[ii, jj, 0])
-                arrG.append(image[ii, jj, 1])
-                arrB.append(image[ii, jj, 2])
-    arrR = np.sort(np.array(arrR))
-    arrG = np.sort(np.array(arrG))
-    arrB = np.sort(np.array(arrB))
-    image[i, j, 0] = arrR[len(arrR) // 2]
-    image[i, j, 1] = arrG[len(arrG) // 2]
-    image[i, j, 2] = arrB[len(arrB) // 2]
-    mask[i, j] = 0
-
-def advanced_inpaint(image, mask):
-    state = 0
-    lock = False
-    mask_found = True
-
-    H = image.shape[0]
-    W = image.shape[1]
-
-    while mask_found:
-        mask_found = False
-        lock = False
-        HS, HE, WS, WE, sth, stw = 0, H, 0, W, 0, 0
-        if state == 0:
-            HS, WS, HE, WE, sth, stw = 0, 0, H, W, 1, 1
-        elif state == 1:
-            HS, WS, HE, WE, sth, stw = W-1, 0, 0, H, -1, 1
-        elif state == 2:
-            HS, WS, HE, WE, sth, stw = H-1, 0, 0, W, -1, 1
-        elif state == 3:
-            HS, WS, HE, WE, sth, stw = 0, 0, W, H, 1, 1
-
-
-        for i in range(HS, HE, sth):
-            for j in range(WS, WE, stw):
-                if mask[i, j] > 0:
-                    mask_found = True
-                    lock = True
-                    median_surrounding_inpaint(image, mask, (i, j))
-            if lock:
-                state = (state + 1) % 4
-                break
-    return image
+HF_API_URL = "https://shivamkunkolikar-unet-inpaint-space.hf.space/run/predict"
 
 @app.route('/')
-def test():
-    return 'Test Successful ! GO to uploads endpoint to save the processed image after applying the mask'
+def home():
+    return 'Object Removal Backend is Live'
 
-@app.route('/uploads')
-def test_inpaint():
-    image_path = os.path.join('uploads', 'beach.jpg')  
-    mask_path = os.path.join('uploads', 'mask.jpg')  
+@app.route('/uploads', methods=['POST'])
+def inpaint():
+    try:
+        if 'image' not in request.files or 'mask' not in request.form:
+            return jsonify({'error': 'Image file or mask array is missing'}), 400
+        
+        image_file = request.files['image']
+        mask_array_flat = request.form['mask']
 
-    image = cv2.imread(image_path)
-    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        mask_array = np.array(eval(mask_array_flat), dtype=np.uint8)
 
-    if image is None or mask is None:
-        return "Image or Mask not found.", 404
+        img_stream = io.BytesIO(image_file.read())
+        image_pil = Image.open(img_stream).convert("RGB")
+        image_np = np.array(image_pil)
 
-    result = advanced_inpaint(image, mask)
+        if mask_array.ndim == 1:
+            mask_array = mask_array.reshape((image_np.shape[0], image_np.shape[1]))
 
-    # Save the result
-    output_path = os.path.join('uploads', 'outputbeachMask.png')
-    cv2.imwrite(output_path, result)
+        if mask_array.shape != image_np.shape[:2]:
+            mask_array = cv2.resize(mask_array, (image_np.shape[1], image_np.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-    return "Image processed and saved successfully!"
+        _, img_encoded = cv2.imencode(".png", image_np)
+        _, mask_encoded = cv2.imencode(".png", mask_array)
+
+        img_base64 = base64.b64encode(img_encoded).decode('utf-8')
+        mask_base64 = base64.b64encode(mask_encoded).decode('utf-8')
+
+        hf_payload = {
+            "data": [
+                f"data:image/png;base64,{img_base64}",
+                f"data:image/png;base64,{mask_base64}"
+            ]
+        }
+
+        response = requests.post(HF_API_URL, json=hf_payload)
+        if response.status_code != 200:
+            return jsonify({'error': 'Failed to get response from HF API'}), 500
+
+        output_data = response.json()
+        result_img_base64 = output_data['data'][0].split(",")[1]
+
+        return jsonify({'processed_image_base64': result_img_base64}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=False,port=8000)
+    app.run(debug=False, port=8000)
